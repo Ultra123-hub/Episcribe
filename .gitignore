@@ -1,0 +1,25 @@
+# Model weights (downloaded, not committed — ~2.49GB)
+models/*.gguf
+models/*.bin
+
+# Local database & exports
+data/*.db
+data/*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Env
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keep folder structure
+!data/.gitkeep
+!models/.gitkeep

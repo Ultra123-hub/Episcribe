@@ -1,0 +1,7 @@
+gradio>=4.44,<5.0
+llama-cpp-python>=0.2.90
+huggingface_hub>=0.24
+pydantic>=2.7
+faster-whisper>=1.0.3
+pandas>=2.0
+python-dotenv>=1.0
