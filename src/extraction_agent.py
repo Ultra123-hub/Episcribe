@@ -70,14 +70,28 @@ def extract(narrative: str, language_hint: str = "Auto-detect") -> Tuple[Optiona
     if not narrative or not narrative.strip():
         return None, "Please enter or transcribe a consultation narrative first."
 
-    user_prompt = f"Language hint: {language_hint}\n\nClinical narrative:\n{narrative.strip()}"
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_prompt},
-    ]
+    base_user_prompt = f"Language hint: {language_hint}\n\nClinical narrative:\n{narrative.strip()}"
 
+    # Each retry resends a fresh, compact prompt (system + narrative + a short
+    # note about the last error) rather than accumulating the full history of
+    # prior bad responses. With a retry conversation that keeps growing,
+    # total context (system prompt + narrative + all prior attempts) can
+    # exceed EPISCRIBE_N_CTX by the 2nd-3rd retry, silently truncating the
+    # JSON schema out of the system prompt and causing exactly the kind of
+    # "missing required field" failure this loop is meant to correct.
     last_error = ""
     for attempt in range(1, config.MAX_EXTRACTION_RETRIES + 1):
+        user_prompt = base_user_prompt
+        if last_error:
+            user_prompt += (
+                f"\n\n(Your previous reply failed validation: {last_error}. "
+                f"Reply again with ONLY a single corrected JSON object, no prose.)"
+            )
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+
         try:
             raw = model_manager.chat(
                 messages=messages,
@@ -90,12 +104,6 @@ def extract(narrative: str, language_hint: str = "Auto-detect") -> Tuple[Optiona
         parsed = _extract_json_block(raw)
         if parsed is None:
             last_error = "Response was not valid JSON."
-            messages.append({"role": "assistant", "content": raw})
-            messages.append({
-                "role": "user",
-                "content": f"That was not valid JSON ({last_error}). "
-                            f"Reply again with ONLY the JSON object, nothing else.",
-            })
             continue
 
         parsed.setdefault("raw_narrative", narrative.strip())
@@ -104,12 +112,6 @@ def extract(narrative: str, language_hint: str = "Auto-detect") -> Tuple[Optiona
             return result, ""
         except Exception as exc:  # pydantic ValidationError or similar
             last_error = str(exc)
-            messages.append({"role": "assistant", "content": raw})
-            messages.append({
-                "role": "user",
-                "content": f"That JSON failed validation: {last_error}. "
-                            f"Reply again with ONLY a corrected JSON object.",
-            })
             continue
 
     return None, f"Could not produce a valid structured record after {config.MAX_EXTRACTION_RETRIES} attempts ({last_error}). Please review manually."

@@ -35,6 +35,15 @@ _RECORD_TRIGGERS = re.compile(
 def _maybe_records_context(user_message: str) -> str:
     if not _RECORD_TRIGGERS.search(user_message):
         return ""
+    if config.ON_HF_SPACES:
+        # On a public Space, every visitor shares one database — pulling
+        # "recent encounters" here would leak whatever anyone else typed
+        # in, the same reason the Records tab itself is hidden there.
+        return (
+            "\n\n[Saved-records lookup is disabled on this public demo, "
+            "since all visitors currently share one database. Run "
+            "EpiScribe locally to use this feature with your own data.]"
+        )
     rows = storage.list_encounters(limit=5)
     if not rows:
         return "\n\n[No saved encounters found yet.]"

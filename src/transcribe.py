@@ -9,6 +9,7 @@ Yoruba, and Twi is limited, so transcripts in those languages should be
 treated as a rough draft the clinician can correct before extraction,
 not as ground truth. French and English transcription are reliable.
 """
+import hashlib
 import threading
 from typing import Optional, Tuple
 
@@ -54,14 +55,31 @@ def _get_whisper_model():
         return _whisper_model
 
 
-def transcribe_audio(audio_path: str, language_hint: str = "Auto-detect") -> Tuple[str, str]:
-    """Returns (transcript_text, detected_language_label)."""
+def _hash_audio_file(audio_path: str) -> str:
+    """sha256 of the raw audio bytes — lets us tell apart 'same audio
+    submitted twice' from 'different audio, identical transcript' (Whisper
+    hallucination/memorization) after the fact, since we don't otherwise
+    keep the audio itself."""
+    h = hashlib.sha256()
+    with open(audio_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:16]
+
+
+def transcribe_audio(audio_path: str, language_hint: str = "Auto-detect") -> Tuple[str, str, str]:
+    """Returns (transcript_text, detected_language_label, audio_hash)."""
     if not audio_path:
-        return "", ""
+        return "", "", ""
     model = _get_whisper_model()
     lang_code: Optional[str] = _LANGUAGE_CODES.get(language_hint)
+    audio_hash = _hash_audio_file(audio_path)
 
-    segments, info = model.transcribe(audio_path, language=lang_code, task="transcribe")
+    # vad_filter skips silence/dead air instead of running the (CPU-bound)
+    # model over it — meaningful speedup on longer recordings with pauses.
+    segments, info = model.transcribe(
+        audio_path, language=lang_code, task="transcribe", vad_filter=True
+    )
     text = " ".join(seg.text.strip() for seg in segments).strip()
     detected = getattr(info, "language", lang_code or "unknown")
-    return text, detected
+    return text, detected, audio_hash

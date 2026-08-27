@@ -44,6 +44,40 @@ WHISPER_DEVICE = os.getenv("EPISCRIBE_WHISPER_DEVICE", "cpu")
 WHISPER_COMPUTE_TYPE = os.getenv("EPISCRIBE_WHISPER_COMPUTE", "int8")
 
 # ---------------------------------------------------------------------------
+# Server binding
+# ---------------------------------------------------------------------------
+# Defaults to localhost-only. Set EPISCRIBE_SERVER_NAME=0.0.0.0 to accept
+# connections from other devices on the same network (e.g. to open the app
+# from a phone browser) — note this app has no authentication, so anyone
+# on the same network/WiFi can reach it while it's bound this way.
+#
+# Hugging Face Spaces sets SPACE_ID automatically inside its containers.
+# .env doesn't exist there (it's gitignored, never deployed), so without
+# this the app would fall back to 127.0.0.1 — unreachable from outside the
+# container, i.e. the Space would look broken to every visitor. Detect
+# Spaces and default to 0.0.0.0 there instead; EPISCRIBE_SERVER_NAME still
+# overrides if explicitly set. Also used elsewhere (app.py) to hide the
+# Records tab on a public Space — visitors there would otherwise share one
+# database and be able to read/export each other's submitted narratives.
+ON_HF_SPACES = bool(os.getenv("SPACE_ID"))
+SERVER_NAME = os.getenv("EPISCRIBE_SERVER_NAME", "0.0.0.0" if ON_HF_SPACES else "127.0.0.1")
+SERVER_PORT = int(os.getenv("EPISCRIBE_SERVER_PORT", "7860"))
+
+# Basic login prompt for demo.launch(auth=...). Only enabled when both are
+# set — leaving either unset keeps the app open with no login, same as
+# before. Matters most when SERVER_NAME is opened up beyond localhost.
+AUTH_USERNAME = os.getenv("EPISCRIBE_AUTH_USERNAME", "")
+AUTH_PASSWORD = os.getenv("EPISCRIBE_AUTH_PASSWORD", "")
+
+# Self-signed HTTPS. Browsers only allow microphone access (getUserMedia)
+# on a secure context — HTTPS, or "localhost" specifically — so a phone
+# opening this over plain http://<LAN-IP> can't use the mic at all. Only
+# enabled when both cert files are set; the browser will show a
+# self-signed-certificate warning to click through on first visit.
+SSL_CERTFILE = os.getenv("EPISCRIBE_SSL_CERTFILE", "")
+SSL_KEYFILE = os.getenv("EPISCRIBE_SSL_KEYFILE", "")
+
+# ---------------------------------------------------------------------------
 # Storage
 # ---------------------------------------------------------------------------
 DB_PATH = DATA_DIR / "episcribe.db"

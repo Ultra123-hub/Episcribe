@@ -2,8 +2,10 @@
 models/*.gguf
 models/*.bin
 
-# Local database & exports
+# Local database & exports — includes real encounter data, never commit
 data/*.db
+data/*.db-journal
+data/*.db.backup
 data/*.csv
 
 # Python
@@ -15,6 +17,9 @@ venv/
 
 # Env
 .env
+
+# Self-signed TLS cert/key for LAN HTTPS access
+certs/
 
 # OS
 .DS_Store

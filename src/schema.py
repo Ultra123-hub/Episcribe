@@ -8,9 +8,9 @@ output is rejected here and triggers a retry (see extraction_agent.py).
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from src.idsr_reference import SEVERITY_LEVELS, SYNDROME_NAMES
+from src.idsr_reference import SEVERITY_LEVELS, SYNDROME_NAMES, program_category_for
 
 
 class ExtractionResult(BaseModel):
@@ -25,6 +25,16 @@ class ExtractionResult(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     summary: str = Field(default="")
     language_detected: str = Field(default="unknown")
+    # WHO IDSR programmatic category (endemic burden / eradication or
+    # elimination target / epidemic-prone) — derived from syndrome_category
+    # via static reference data below, never asked of the LLM. Any value
+    # the model supplies for this field is ignored/overwritten.
+    public_health_category: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _derive_public_health_category(self) -> "ExtractionResult":
+        self.public_health_category = program_category_for(self.syndrome_category)
+        return self
 
     @field_validator("syndrome_category")
     @classmethod
@@ -55,3 +65,9 @@ class EncounterRecord(ExtractionResult):
     id: Optional[int] = None
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat(timespec="seconds"))
     raw_narrative: str = ""
+    # sha256 (truncated) of the source audio, when the narrative came from
+    # a recording — lets two records be compared to tell "same audio
+    # resubmitted" apart from "different audio, identical transcript"
+    # (Whisper hallucination/memorization) after the fact. Empty for
+    # narratives that were typed rather than transcribed.
+    audio_hash: str = ""

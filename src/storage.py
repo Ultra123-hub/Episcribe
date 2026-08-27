@@ -29,9 +29,18 @@ CREATE TABLE IF NOT EXISTS encounters (
     confidence REAL,
     summary TEXT,
     language_detected TEXT,
-    raw_narrative TEXT
+    raw_narrative TEXT,
+    public_health_category TEXT,
+    audio_hash TEXT
 );
 """
+
+# Columns added after the initial release — applied via ALTER TABLE against
+# any pre-existing database file rather than losing already-saved records.
+_MIGRATIONS = [
+    ("public_health_category", "TEXT"),
+    ("audio_hash", "TEXT"),
+]
 
 
 def _connect() -> sqlite3.Connection:
@@ -43,6 +52,10 @@ def _connect() -> sqlite3.Connection:
 def init_db() -> None:
     with _connect() as conn:
         conn.execute(_SCHEMA)
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(encounters)")}
+        for col_name, col_type in _MIGRATIONS:
+            if col_name not in existing:
+                conn.execute(f"ALTER TABLE encounters ADD COLUMN {col_name} {col_type}")
 
 
 def save_encounter(record: EncounterRecord) -> int:
@@ -52,8 +65,9 @@ def save_encounter(record: EncounterRecord) -> int:
             """INSERT INTO encounters
                (timestamp, syndrome_category, symptoms, onset_days, severity,
                 age_group, sex, icd10_codes, reportable, confidence, summary,
-                language_detected, raw_narrative)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                language_detected, raw_narrative, public_health_category,
+                audio_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.timestamp,
                 record.syndrome_category,
@@ -68,6 +82,8 @@ def save_encounter(record: EncounterRecord) -> int:
                 record.summary,
                 record.language_detected,
                 record.raw_narrative,
+                json.dumps(record.public_health_category),
+                record.audio_hash,
             ),
         )
         return cur.lastrowid
@@ -77,6 +93,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     d["symptoms"] = json.loads(d["symptoms"] or "[]")
     d["icd10_codes"] = json.loads(d["icd10_codes"] or "[]")
+    d["public_health_category"] = json.loads(d.get("public_health_category") or "[]")
     d["reportable"] = bool(d["reportable"])
     return d
 
@@ -109,6 +126,7 @@ def export_csv(path: Optional[str] = None) -> str:
         "id", "timestamp", "syndrome_category", "symptoms", "onset_days",
         "severity", "age_group", "sex", "icd10_codes", "reportable",
         "confidence", "summary", "language_detected", "raw_narrative",
+        "public_health_category", "audio_hash",
     ]
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -117,5 +135,6 @@ def export_csv(path: Optional[str] = None) -> str:
             row = dict(row)
             row["symptoms"] = "; ".join(row["symptoms"])
             row["icd10_codes"] = "; ".join(row["icd10_codes"])
+            row["public_health_category"] = "; ".join(row["public_health_category"])
             writer.writerow(row)
     return str(out_path)

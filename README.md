@@ -1,3 +1,14 @@
+---
+title: EpiScribe
+emoji: 🩺
+colorFrom: blue
+colorTo: green
+sdk: gradio
+sdk_version: 4.44.1
+app_file: app.py
+pinned: false
+---
+
 # EpiScribe
 
 Offline-capable, multilingual clinical documentation assistant for WHO

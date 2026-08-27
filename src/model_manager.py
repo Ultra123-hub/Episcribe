@@ -88,5 +88,12 @@ def chat(messages, max_tokens: int, temperature: float) -> str:
         messages=messages,
         max_tokens=max_tokens,
         temperature=temperature,
+        # llama-cpp-python's repeat_penalty defaults to 1.0 (no penalty at
+        # all). Combined with our low extraction temperature, that let the
+        # model loop on a short phrase ("Multiple cases of similar illness
+        # in area." x4) instead of producing a real summary. 1.3 penalizes
+        # recently-used tokens enough to break loops without meaningfully
+        # hurting normal JSON output.
+        repeat_penalty=1.3,
     )
     return result["choices"][0]["message"]["content"].strip()
