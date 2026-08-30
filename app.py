@@ -19,6 +19,27 @@ from src import chat_agent, extraction_agent, storage, transcribe
 from src.idsr_reference import SUPPORTED_LANGUAGES
 from src.schema import EncounterRecord
 
+# --- Satisfy HF Spaces' ZeroGPU startup check -------------------------------
+# This Space's hardware is forced to ZeroGPU (CPU-basic downgrade requires a
+# PRO subscription on this account, and CPU basic wasn't selectable when
+# creating a fresh Space either). HF's ZeroGPU runtime refuses to start any
+# app with no @spaces.GPU-decorated function at all ("No @spaces.GPU
+# function detected during startup"). This app is CPU-only by design
+# (llama-cpp-python, EPISCRIBE_N_GPU_LAYERS=0; faster-whisper on CPU) and
+# never needs a GPU — this dummy function is never called, it exists purely
+# to pass that check. Guarded so local runs (no `spaces` package installed,
+# no GPU available anyway) are unaffected.
+if config.ON_HF_SPACES:
+    try:
+        import spaces
+
+        @spaces.GPU
+        def _zerogpu_startup_check():  # pragma: no cover — never invoked
+            pass
+    except ImportError:
+        pass
+# -----------------------------------------------------------------------------
+
 # --- Silence benign Windows asyncio connection-reset noise ------------------
 # On Windows, asyncio's ProactorEventLoop logs an "Exception in callback"
 # whenever a client (browser tab closing, phone locking/backgrounding,
