@@ -1,5 +1,7 @@
 """
-Pydantic schema for a validated, structured IDSR clinical record.
+Pydantic schema for a validated, structured IDSR clinical record — now
+paired with a SOAP-format note from the same encounter (see module-level
+comment in extraction_agent.py for why these come from one LLM call).
 
 Every model extraction is parsed into this schema before it is shown to
 the user or written to storage — malformed or out-of-vocabulary model
@@ -24,12 +26,37 @@ class ExtractionResult(BaseModel):
     reportable: bool = False
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     summary: str = Field(default="")
+    # Set by extraction_agent.detect_language() before validation, not
+    # asked of the LLM as part of the main extraction JSON — a single
+    # dedicated language-ID pass (reused from right after transcription,
+    # see app.py) is more consistent than asking the model to re-guess it
+    # here, and keeps the extraction prompt shorter.
     language_detected: str = Field(default="unknown")
     # WHO IDSR programmatic category (endemic burden / eradication or
     # elimination target / epidemic-prone) — derived from syndrome_category
     # via static reference data below, never asked of the LLM. Any value
     # the model supplies for this field is ignored/overwritten.
     public_health_category: List[str] = Field(default_factory=list)
+
+    # SOAP-format clinical note fields, produced by the same extraction
+    # call as the IDSR fields above (one model, one call, two output
+    # shapes) — gives clinicians a familiar clinical-note view of the
+    # same encounter alongside the surveillance-focused IDSR view.
+    soap_subjective: str = Field(default="", description="Patient's reported complaint, in their own words/context")
+    soap_objective: str = Field(default="", description="Observable/measurable findings mentioned in the narrative")
+    soap_assessment: str = Field(default="", description="Clinical assessment / likely diagnosis reasoning")
+    soap_plan: str = Field(default="", description="Recommended next steps or plan")
+
+    # Populated by extraction_agent AFTER validation, not asked of the LLM.
+    # Testing at low temperature showed soap_objective/assessment/plan
+    # routinely mention symptoms, diagnoses, or public-health claims with
+    # no basis in either the extracted `symptoms` list or the source
+    # narrative (e.g. a skin-rash case whose SOAP note described vomiting;
+    # a single-case respiratory complaint whose summary invented a COVID
+    # outbreak warning). Each string here names one such ungrounded claim,
+    # so a reviewer sees exactly what to double-check instead of having to
+    # re-read the whole note looking for it. Empty list = nothing flagged.
+    hallucination_flags: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _derive_public_health_category(self) -> "ExtractionResult":

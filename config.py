@@ -87,3 +87,10 @@ DB_PATH = DATA_DIR / "episcribe.db"
 # ---------------------------------------------------------------------------
 MAX_EXTRACTION_RETRIES = 3
 LOW_CONFIDENCE_THRESHOLD = 0.5
+
+# ---------------------------------------------------------------------------
+# STT backend selection + Sahara (Intron Voice API)
+# ---------------------------------------------------------------------------
+STT_BACKEND = os.getenv("EPISCRIBE_STT_BACKEND", "whisper").strip().lower()
+SAHARA_API_KEY = os.getenv("SAHARA_API_KEY", "")
+MAX_TOKENS_EXTRACTION = 1536

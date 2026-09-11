@@ -7,7 +7,8 @@ Run locally:
 
 The first run downloads the EpiCast fine-tuned MedGemma 4B GGUF model
 (~2.49GB) and a faster-whisper model; both are cached locally afterward
-and no further internet access is required.
+and no further internet access is required (unless EPISCRIBE_STT_BACKEND
+is set to "sahara", which requires connectivity — see src/transcribe.py).
 """
 import sys
 
@@ -90,6 +91,12 @@ _gc_utils._json_schema_to_python_type = _patched_json_schema_to_python_type
 
 storage.init_db()
 
+# Encounters logged with the same syndrome_category within this many days
+# trigger the cluster banner in run_extraction below (see
+# storage.recent_cluster_count for what this signal does and doesn't mean).
+CLUSTER_WINDOW_DAYS = 7
+CLUSTER_THRESHOLD = 3
+
 
 # ---------------------------------------------------------------------------
 # Tab 1: New Consultation
@@ -98,30 +105,44 @@ def do_transcribe(audio_path, language_hint):
     if not audio_path:
         return gr.update(), "No audio recorded.", ""
     try:
-        text, detected, audio_hash = transcribe.transcribe_audio(audio_path, language_hint)
+        text, _backend_detected, audio_hash = transcribe.transcribe_audio(audio_path, language_hint)
     except Exception as exc:
         return gr.update(), f"Transcription failed: {exc}", ""
     if not text:
         return gr.update(), "Could not transcribe any speech from the recording.", ""
-    return text, f"Transcribed (detected language: {detected}). Review and edit before submitting.", audio_hash
+    # Language is resolved during extraction (one LLM call, see
+    # extraction_agent.py) rather than here — an earlier version ran a
+    # separate detect_language() pass immediately after transcription for
+    # a more responsive display, but that cost a full extra LLM round-trip
+    # per submission and measurably hurt CPU inference latency. Speed won.
+    status = "Transcribed. Review and edit before submitting."
+    return text, status, audio_hash
 
 
 def run_extraction(narrative, language_hint, audio_hash):
     result, error = extraction_agent.extract(narrative, language_hint)
     if result is None:
-        return "", "❌ " + error, None, gr.update(visible=False)
+        return "", "", "❌ " + error, None, gr.update(visible=False)
 
     record = EncounterRecord(
         **result.model_dump(), raw_narrative=narrative.strip(), audio_hash=audio_hash or ""
     )
     record_id = storage.save_encounter(record)
+    cluster_count = storage.recent_cluster_count(result.syndrome_category, days=CLUSTER_WINDOW_DAYS)
 
-    warn = ""
+    cluster_banner = ""
+    if cluster_count >= CLUSTER_THRESHOLD:
+        cluster_banner = (
+            f"\n\n🚨 **{cluster_count} cases of {result.syndrome_category} logged in the "
+            f"last {CLUSTER_WINDOW_DAYS} days** — possible cluster, consider investigating.\n"
+        )
+
+    low_confidence_warn = ""
     if result.confidence < config.LOW_CONFIDENCE_THRESHOLD:
-        warn = "\n\n⚠️ **Low confidence — please review this record manually.**"
+        low_confidence_warn = "\n\n⚠️ **Low confidence — please review this record manually.**"
 
-    summary_md = f"""### ✅ Saved as Encounter #{record_id}
-
+    idsr_md = f"""### ✅ Saved as Encounter #{record_id}
+{cluster_banner}
 **Syndrome category:** {result.syndrome_category}
 **Public health category:** {", ".join(result.public_health_category) or "—"}
 **Severity:** {result.severity}  |  **Onset:** {result.onset_days if result.onset_days is not None else "unknown"} day(s)
@@ -133,16 +154,40 @@ def run_extraction(narrative, language_hint, audio_hash):
 
 **Summary:** {result.summary}
 **Symptoms:** {", ".join(result.symptoms) or "—"}
-{warn}
+{low_confidence_warn}
 """
-    return summary_md, "", result.model_dump(), gr.update(visible=True)
+
+    guard_banner = ""
+    if result.hallucination_flags:
+        flag_lines = "\n".join(f"- {f}" for f in result.hallucination_flags)
+        guard_banner = (
+            "\n> ⚠️ **Hallucination Guard flagged this note — verify before use:**\n"
+            f"{flag_lines}\n"
+        )
+
+    soap_md = f"""### SOAP Note — Encounter #{record_id}
+{guard_banner}
+**Subjective**
+{result.soap_subjective or "—"}
+
+**Objective**
+{result.soap_objective or "—"}
+
+**Assessment**
+{result.soap_assessment or "—"}
+
+**Plan**
+{result.soap_plan or "—"}
+"""
+
+    return idsr_md, soap_md, "", result.model_dump(), gr.update(visible=True)
 
 
 # ---------------------------------------------------------------------------
 # Tab 2: Records
 # ---------------------------------------------------------------------------
 _RECORD_COLUMNS = [
-    "id", "timestamp", "syndrome_category", "public_health_category",
+    "flag", "id", "timestamp", "syndrome_category", "public_health_category",
     "symptoms", "severity", "reportable", "confidence", "summary",
 ]
 
@@ -154,6 +199,13 @@ def refresh_records(keyword):
     df = pd.DataFrame(rows)
     df["symptoms"] = df["symptoms"].apply(lambda v: ", ".join(v))
     df["public_health_category"] = df["public_health_category"].apply(lambda v: ", ".join(v))
+    # Visual flag for rows a supervisor should double-check: either a low
+    # confidence score, or the Hallucination Guard finding something in the
+    # SOAP note ungrounded in the extracted symptoms/narrative — either
+    # signal is enough to warrant a manual look, so either one lights this up.
+    has_guard_flags = df["hallucination_flags"].apply(lambda v: bool(v))
+    low_confidence = df["confidence"] < config.LOW_CONFIDENCE_THRESHOLD
+    df["flag"] = (low_confidence | has_guard_flags).apply(lambda x: "⚠️" if x else "")
     return df[_RECORD_COLUMNS]
 
 
@@ -199,20 +251,24 @@ with gr.Blocks(title="EpiScribe") as demo:
                 )
                 audio_input = gr.Audio(
                     sources=["microphone", "upload"], type="filepath",
-                    label="Or record/upload audio (offline transcription)",
+                    label="Or record/upload audio",
                 )
                 transcribe_btn = gr.Button("🎙️ Transcribe audio into narrative")
                 transcribe_status = gr.Markdown("")
-                submit_btn = gr.Button("Extract structured IDSR record", variant="primary")
+                submit_btn = gr.Button("Generate clinical documentation", variant="primary")
             with gr.Column(scale=2):
-                result_md = gr.Markdown(label="Structured record")
+                with gr.Tabs():
+                    with gr.Tab("IDSR Record"):
+                        idsr_md = gr.Markdown(label="IDSR structured record")
+                    with gr.Tab("SOAP Note"):
+                        soap_md = gr.Markdown(label="SOAP note")
                 error_md = gr.Markdown("")
                 result_json = gr.JSON(label="Raw structured output", visible=False)
 
-        # Carries the source audio's hash from transcription through to the
-        # saved record — provenance only, not shown in the UI. Lets a later
-        # "why did two recordings produce the same transcript?" question be
-        # answered definitively instead of guessed at.
+        # Carries the source audio's hash through to the saved record —
+        # provenance only, not shown in the UI. Lets a later "why did two
+        # recordings produce the same transcript?" question be answered
+        # definitively instead of guessed at.
         audio_hash_state = gr.State(value="")
 
         transcribe_btn.click(
@@ -220,8 +276,9 @@ with gr.Blocks(title="EpiScribe") as demo:
             outputs=[narrative_box, transcribe_status, audio_hash_state],
         )
         submit_btn.click(
-            run_extraction, inputs=[narrative_box, language_hint, audio_hash_state],
-            outputs=[result_md, error_md, result_json, result_json],
+            run_extraction,
+            inputs=[narrative_box, language_hint, audio_hash_state],
+            outputs=[idsr_md, soap_md, error_md, result_json, result_json],
         )
 
     # Hidden on a public HF Space: every visitor there shares one database,
@@ -233,6 +290,7 @@ with gr.Blocks(title="EpiScribe") as demo:
                 keyword_box = gr.Textbox(label="Filter by keyword (syndrome, summary, narrative)", scale=3)
                 refresh_btn = gr.Button("🔄 Refresh", scale=1)
                 export_btn = gr.Button("⬇️ Export CSV", scale=1)
+            gr.Markdown("⚠️ in the **flag** column marks encounters below the confidence threshold, or where the Hallucination Guard found SOAP-note content ungrounded in the extracted symptoms/narrative. Open the SOAP Note tab for that encounter to see the specific reason.")
             records_table = gr.Dataframe(interactive=False, wrap=True)
             export_file = gr.File(label="Exported CSV", visible=True)
 
@@ -259,7 +317,7 @@ if __name__ == "__main__":
         else None
     )
     ssl_enabled = bool(config.SSL_CERTFILE and config.SSL_KEYFILE)
-    demo.launch(
+    demo.launch(share=True,
         server_name=config.SERVER_NAME,
         server_port=config.SERVER_PORT,
         auth=auth,
