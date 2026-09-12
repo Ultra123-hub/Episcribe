@@ -8,6 +8,7 @@ copied off a facility laptop or exported to CSV for district reporting.
 import csv
 import json
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -40,6 +41,11 @@ CREATE TABLE IF NOT EXISTS encounters (
 _MIGRATIONS = [
     ("public_health_category", "TEXT"),
     ("audio_hash", "TEXT"),
+    ("soap_subjective", "TEXT"),
+    ("soap_objective", "TEXT"),
+    ("soap_assessment", "TEXT"),
+    ("soap_plan", "TEXT"),
+    ("hallucination_flags", "TEXT"),
 ]
 
 
@@ -66,8 +72,9 @@ def save_encounter(record: EncounterRecord) -> int:
                (timestamp, syndrome_category, symptoms, onset_days, severity,
                 age_group, sex, icd10_codes, reportable, confidence, summary,
                 language_detected, raw_narrative, public_health_category,
-                audio_hash)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                audio_hash, soap_subjective, soap_objective, soap_assessment,
+                soap_plan, hallucination_flags)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.timestamp,
                 record.syndrome_category,
@@ -84,6 +91,11 @@ def save_encounter(record: EncounterRecord) -> int:
                 record.raw_narrative,
                 json.dumps(record.public_health_category),
                 record.audio_hash,
+                record.soap_subjective,
+                record.soap_objective,
+                record.soap_assessment,
+                record.soap_plan,
+                json.dumps(record.hallucination_flags),
             ),
         )
         return cur.lastrowid
@@ -95,6 +107,11 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     d["icd10_codes"] = json.loads(d["icd10_codes"] or "[]")
     d["public_health_category"] = json.loads(d.get("public_health_category") or "[]")
     d["reportable"] = bool(d["reportable"])
+    d["soap_subjective"] = d.get("soap_subjective") or ""
+    d["soap_objective"] = d.get("soap_objective") or ""
+    d["soap_assessment"] = d.get("soap_assessment") or ""
+    d["soap_plan"] = d.get("soap_plan") or ""
+    d["hallucination_flags"] = json.loads(d.get("hallucination_flags") or "[]")
     return d
 
 
@@ -118,6 +135,25 @@ def list_encounters(limit: int = 200, keyword: Optional[str] = None) -> List[dic
     return [_row_to_dict(r) for r in rows]
 
 
+def recent_cluster_count(syndrome_category: str, days: int = 7) -> int:
+    """Count of encounters with the same syndrome_category logged in the
+    last `days` days (inclusive of the one just saved) — a lightweight,
+    local-only outbreak/cluster signal. Not epidemiological surveillance
+    in any rigorous sense (no denominator, no population data, no spatial
+    clustering) — just a same-facility 'this is happening a lot lately'
+    flag to prompt a human to look closer, which is honest about what a
+    single offline SQLite file can actually tell you."""
+    init_db()
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat(timespec="seconds")
+    with _connect() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) AS c FROM encounters
+               WHERE syndrome_category = ? AND timestamp >= ?""",
+            (syndrome_category, cutoff),
+        ).fetchone()
+    return row["c"] if row else 0
+
+
 def export_csv(path: Optional[str] = None) -> str:
     init_db()
     out_path = Path(path) if path else config.DATA_DIR / "episcribe_export.csv"
@@ -126,7 +162,8 @@ def export_csv(path: Optional[str] = None) -> str:
         "id", "timestamp", "syndrome_category", "symptoms", "onset_days",
         "severity", "age_group", "sex", "icd10_codes", "reportable",
         "confidence", "summary", "language_detected", "raw_narrative",
-        "public_health_category", "audio_hash",
+        "public_health_category", "audio_hash", "soap_subjective",
+        "soap_objective", "soap_assessment", "soap_plan", "hallucination_flags",
     ]
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -136,5 +173,6 @@ def export_csv(path: Optional[str] = None) -> str:
             row["symptoms"] = "; ".join(row["symptoms"])
             row["icd10_codes"] = "; ".join(row["icd10_codes"])
             row["public_health_category"] = "; ".join(row["public_health_category"])
+            row["hallucination_flags"] = "; ".join(row["hallucination_flags"])
             writer.writerow(row)
     return str(out_path)
