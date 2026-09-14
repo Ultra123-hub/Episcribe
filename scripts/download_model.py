@@ -20,7 +20,11 @@ def main():
     print(f"Model file:  {config.HF_MODEL_FILENAME}")
     print(f"Target path: {config.LOCAL_MODEL_PATH}\n")
     model_manager.get_model()
-    print("\n✅ Model downloaded and loads successfully.")
+    # Plain ASCII, not an emoji: Windows' default cp1252 console encoding
+    # can't render "✅" and this print would crash after the download had
+    # already succeeded (same class of bug fixed for model_manager.py's
+    # download message in PR #1 -- that fix just didn't cover this file).
+    print("\n[OK] Model downloaded and loads successfully.")
 
 
 if __name__ == "__main__":
