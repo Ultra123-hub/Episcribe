@@ -50,7 +50,9 @@ Your job: read the clinical narrative and output ONLY a single JSON object \
 {{
   "syndrome_category": one of {SYNDROME_NAMES},
   "symptoms": [short symptom strings, in English, ONLY symptoms the patient \
-actually reports having — never include a symptom the narrative explicitly denies],
+actually reports having — never include a symptom the narrative explicitly denies. \
+Example: narrative says "no cough, denies fever" -> do not include "cough" or \
+"fever" in symptoms even if they're mentioned elsewhere for context],
   "onset_days": integer number of days since symptom onset, or null if unknown,
   "severity": one of {SEVERITY_LEVELS},
   "age_group": e.g. "infant", "child", "adult", "elderly", or "unknown",
@@ -119,6 +121,79 @@ def _extract_json_block(text: str) -> Optional[dict]:
         except json.JSONDecodeError:
             return None
     return None
+
+
+def _repair_truncated_json(text: str) -> Optional[dict]:
+    """Best-effort recovery for JSON cut off mid-generation.
+
+    Observed cause (see verification in docs/extraction_verification.md):
+    the model sometimes emits an end-of-turn token mid-string -- typically
+    inside one of the free-text soap_* fields, which come last in the
+    schema -- well before max_tokens (~140-150 tokens generated against a
+    1536 cap), leaving the object unterminated. Rather than discarding an
+    otherwise-complete, correctly generated record just because the LAST
+    field got cut off, trim back to the last complete "key": value pair
+    and close the object there.
+
+    Every field this can drop has a safe default in ExtractionResult
+    except syndrome_category, which is always the FIRST key in the
+    prompt's schema and therefore the first one generated -- if
+    truncation happened early enough to lose it, the repaired dict will
+    still fail pydantic validation same as before repair, so this can't
+    silently produce a placeholder record.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    text = text[start:]
+    # Try closing the object at each earlier top-level "key": boundary,
+    # starting from the latest (drops the least) and working backward.
+    for m in reversed(list(re.finditer(r',\s*"\w+"\s*:', text))):
+        candidate = text[: m.start()] + "}"
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _extract_json_block_with_repair(text: str) -> Tuple[Optional[dict], bool]:
+    """Wraps _extract_json_block with a fallback repair pass for output
+    truncated mid-generation. Returns (parsed_dict_or_None, was_repaired)."""
+    parsed = _extract_json_block(text)
+    if parsed is not None:
+        return parsed, False
+    repaired = _repair_truncated_json(text)
+    return repaired, repaired is not None
+
+
+# Deterministic guard for the negation-handling failure mode observed in
+# testing: the model sometimes lists a symptom in `symptoms` that the
+# narrative explicitly denies (e.g. narrative says "No cough" but the
+# model still returns "cough"), despite the SYSTEM_PROMPT instructing it
+# not to. Same spirit as _soap_hallucination_flags below -- a cheap,
+# deterministic keyword check, not a general negation-scope parser. This
+# catches an exact-word denial next to the symptom term; it won't catch
+# every phrasing (e.g. "denies difficulty breathing" won't match a symptom
+# the model wrote as "dyspnea") -- that's a known remaining gap.
+_NEGATION_CUES = r"(?:no|denies|denied|without|not|absent|negative for)"
+
+
+def _filter_denied_symptoms(symptoms: list, narrative: str) -> Tuple[list, list]:
+    """Drops any symptom whose exact wording is immediately preceded (within
+    ~4 words) by a negation cue in the narrative. Returns (kept, dropped)."""
+    lowered = narrative.lower()
+    kept, dropped = [], []
+    for symptom in symptoms:
+        word = symptom.replace("_", " ").strip().lower()
+        if not word:
+            continue
+        pattern = rf"\b{_NEGATION_CUES}\b(?:\s+\w+){{0,4}}\s+{re.escape(word)}\b"
+        if re.search(pattern, lowered):
+            dropped.append(symptom)
+        else:
+            kept.append(symptom)
+    return kept, dropped
 
 
 def _build_summary(result: ExtractionResult) -> str:
@@ -218,7 +293,7 @@ def extract(narrative: str, language_hint: str = "Auto-detect") -> Tuple[Optiona
 
         last_raw = raw  # kept so we can surface it if every attempt fails
 
-        parsed = _extract_json_block(raw)
+        parsed, was_repaired = _extract_json_block_with_repair(raw)
         if parsed is None:
             last_error = "Response was not valid JSON."
             continue
@@ -235,11 +310,29 @@ def extract(narrative: str, language_hint: str = "Auto-detect") -> Tuple[Optiona
         # data instead, which is the whole point: nothing free-authored,
         # nothing to hallucinate.
         result.soap_subjective = narrative.strip()
+        # Negation guard: drop any symptom the narrative appears to
+        # explicitly deny (see _filter_denied_symptoms docstring) before
+        # building the summary/reportability off of it.
+        kept_symptoms, denied_symptoms = _filter_denied_symptoms(result.symptoms, narrative)
+        result.symptoms = kept_symptoms
         result.summary = _build_summary(result)
         # Hallucination Guard: runs on whatever the model DID freely author
         # (soap_objective/assessment/plan) and surfaces anything ungrounded
         # rather than silently trusting it.
         result.hallucination_flags = _soap_hallucination_flags(result, narrative)
+        if denied_symptoms:
+            result.hallucination_flags.append(
+                "Removed symptom(s) the narrative appears to explicitly "
+                f"deny: {', '.join(denied_symptoms)}. Verify against the "
+                "original narrative."
+            )
+        if was_repaired:
+            result.hallucination_flags.append(
+                "Model output was cut off before finishing (likely mid "
+                "soap_assessment/soap_plan) -- this record was recovered "
+                "from a truncated response, so soap_assessment/soap_plan "
+                "may be blank or incomplete. Review manually."
+            )
         return result, ""
 
     # DEBUG: every attempt failed. Print the last raw model output so we can

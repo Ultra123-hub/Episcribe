@@ -12,7 +12,11 @@ import config
 config.DB_PATH = __import__("pathlib").Path(tempfile.mktemp(suffix=".db"))
 
 from src.schema import ExtractionResult, EncounterRecord
-from src.extraction_agent import _extract_json_block
+from src.extraction_agent import (
+    _extract_json_block,
+    _extract_json_block_with_repair,
+    _filter_denied_symptoms,
+)
 from src import storage
 
 print("== Schema validation ==")
@@ -47,6 +51,37 @@ noisy = 'Sure, here is the JSON: {"syndrome_category": "Acute Febrile Illness", 
 parsed2 = _extract_json_block(noisy)
 assert parsed2 and parsed2["syndrome_category"] == "Acute Febrile Illness"
 print("PASS: parsed JSON embedded in prose ->", parsed2)
+
+print("\n== Truncated-JSON repair (docs/extraction_verification.md) ==")
+# Real raw output captured during task-2 verification: the model hit an
+# early end-of-turn token mid-soap_assessment, well under max_tokens,
+# leaving the object unterminated.
+truncated = (
+    '{\n  "syndrome_category": "Acute Rash with Fever",\n  "symptoms": '
+    '[\n    "cough",\n    "fever"\n  ],\n  "severity": "moderate",\n  '
+    '"confidence": 0.89,\n  "soap_objective": "rash on face.",\n  '
+    '"soap_assessment": "this is not typical for measles or chickenpox.'
+)
+parsed3, was_repaired = _extract_json_block_with_repair(truncated)
+assert parsed3 and was_repaired and parsed3["syndrome_category"] == "Acute Rash with Fever"
+assert "soap_assessment" not in parsed3, "repair should drop the truncated trailing field, not guess at it"
+print("PASS: recovered syndrome_category/symptoms from truncated JSON, dropped the broken trailing field ->", parsed3)
+
+complete = '{"syndrome_category": "Acute Watery Diarrhea", "confidence": 0.7}'
+parsed4, was_repaired4 = _extract_json_block_with_repair(complete)
+assert parsed4 and not was_repaired4, "a complete object should not be flagged as repaired"
+print("PASS: complete JSON is not flagged as repaired")
+
+print("\n== Denied-symptom filter ==")
+kept, dropped = _filter_denied_symptoms(
+    ["cough", "fever", "rash"], "Patient has fever and rash. No cough reported."
+)
+assert dropped == ["cough"] and kept == ["fever", "rash"], (kept, dropped)
+print("PASS: dropped explicitly denied symptom ->", "kept:", kept, "dropped:", dropped)
+
+kept2, dropped2 = _filter_denied_symptoms(["fever", "rash"], "Patient has fever and rash.")
+assert dropped2 == [] and kept2 == ["fever", "rash"]
+print("PASS: no false positives when nothing is denied ->", kept2)
 
 print("\n== Storage roundtrip ==")
 record = EncounterRecord(**ok.model_dump(), raw_narrative="test narrative")
