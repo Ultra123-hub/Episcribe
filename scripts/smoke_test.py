@@ -1,6 +1,12 @@
 """Smoke test for logic that doesn't require the LLM (run manually, not shipped as a real test suite)."""
 import sys, tempfile, os
-sys.path.insert(0, os.path.dirname(__file__))
+from pathlib import Path
+# Project root, not this file's own directory (scripts/) -- matches the
+# pattern in download_model.py. The previous one-line version only added
+# scripts/ itself, which doesn't resolve "import config" at the project
+# root; commit caa6bca's message claimed this exact fix had already been
+# made and verified passing, but the code here was never actually changed.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config
 config.DB_PATH = __import__("pathlib").Path(tempfile.mktemp(suffix=".db"))
