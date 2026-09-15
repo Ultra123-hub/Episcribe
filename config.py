@@ -94,3 +94,13 @@ LOW_CONFIDENCE_THRESHOLD = 0.5
 STT_BACKEND = os.getenv("EPISCRIBE_STT_BACKEND", "whisper").strip().lower()
 SAHARA_API_KEY = os.getenv("SAHARA_API_KEY", "")
 MAX_TOKENS_EXTRACTION = 1536
+
+# ---------------------------------------------------------------------------
+# Sahara streaming TTS (spoken assistant replies)
+# ---------------------------------------------------------------------------
+# "en" + a West African accent reads IDSR guidance replies (mostly English)
+# in a voice closer to the app's intended users than a generic US/UK voice.
+# See docs.voice.intron.io/docs/tts/supported-languages-and-accents.
+SAHARA_TTS_VOICE_LANGUAGE = os.getenv("EPISCRIBE_TTS_VOICE_LANGUAGE", "en")
+SAHARA_TTS_VOICE_ACCENT = os.getenv("EPISCRIBE_TTS_VOICE_ACCENT", "hausa")
+SAHARA_TTS_VOICE_GENDER = os.getenv("EPISCRIBE_TTS_VOICE_GENDER", "female")

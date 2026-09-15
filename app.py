@@ -10,13 +10,15 @@ The first run downloads the EpiCast fine-tuned MedGemma 4B GGUF model
 and no further internet access is required (unless EPISCRIBE_STT_BACKEND
 is set to "sahara", which requires connectivity — see src/transcribe.py).
 """
+import os
 import sys
+import tempfile
 
 import gradio as gr
 import pandas as pd
 
 import config
-from src import chat_agent, extraction_agent, storage, transcribe
+from src import chat_agent, extraction_agent, storage, transcribe, tts
 from src.idsr_reference import SUPPORTED_LANGUAGES
 from src.schema import EncounterRecord
 
@@ -224,7 +226,21 @@ def chat_respond(message, history):
         {"role": "user", "content": message},
         {"role": "assistant", "content": reply_text},
     ]
-    return "", history
+    # Spoken reply via Sahara streaming TTS (task 3). Best-effort: a TTS
+    # outage shouldn't break the chat itself, which already worked and is
+    # shown above regardless -- just leave the audio player empty and log
+    # why, rather than raising out of the whole click handler.
+    audio_path = None
+    if config.SAHARA_API_KEY:
+        try:
+            audio_bytes = tts.synthesize_speech(reply_text)
+            if audio_bytes:
+                fd, audio_path = tempfile.mkstemp(suffix=".wav")
+                with os.fdopen(fd, "wb") as f:
+                    f.write(audio_bytes)
+        except Exception as exc:
+            print(f"[app] Sahara TTS failed, continuing without spoken reply: {exc}")
+    return "", history, audio_path
 
 
 # ---------------------------------------------------------------------------
@@ -306,9 +322,16 @@ with gr.Blocks(title="EpiScribe") as demo:
         chatbot = gr.Chatbot(type="messages", height=420)
         chat_input = gr.Textbox(label="Message", placeholder="e.g. What distinguishes AWD from ABD under IDSR?")
         chat_send = gr.Button("Send", variant="primary")
+        chat_audio = gr.Audio(
+            label="Spoken reply (Sahara 2.5 TTS)", autoplay=True, interactive=False
+        )
 
-        chat_send.click(chat_respond, inputs=[chat_input, chatbot], outputs=[chat_input, chatbot])
-        chat_input.submit(chat_respond, inputs=[chat_input, chatbot], outputs=[chat_input, chatbot])
+        chat_send.click(
+            chat_respond, inputs=[chat_input, chatbot], outputs=[chat_input, chatbot, chat_audio]
+        )
+        chat_input.submit(
+            chat_respond, inputs=[chat_input, chatbot], outputs=[chat_input, chatbot, chat_audio]
+        )
 
 if __name__ == "__main__":
     auth = (
