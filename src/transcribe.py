@@ -18,16 +18,35 @@ Sahara requires an internet connection and an API key
 (SAHARA_API_KEY), but is purpose-built for African-accented and
 code-switched speech (e.g. Hausa-English, Yoruba-English,
 Pidgin-English) and should be materially more accurate on those
-languages when connectivity allows. Uses Sahara's asynchronous
-file-upload endpoint (upload, then poll for status) rather than its
-synchronous one, which hard-caps audio at 120 seconds/request -- most
-real consultation-length recordings exceed that (confirmed during
-verification, see docs/sahara_stt_verification.md), so async is what
-lets a full recording get transcribed instead of silently truncated.
+languages when connectivity allows.
+
+Uses Sahara's asynchronous file-upload endpoint (upload, then poll
+/file/v1/status/{file_id} until FILE_TRANSCRIBED) rather than its
+synchronous one, which hard-caps audio at 120s/request -- confirmed via
+task-1 verification (docs/sahara_stt_verification.md) that most real
+consultation-length recordings exceed that.
+
+IMPORTANT, confirmed directly against the live API (found the hard way
+-- see git history for the earlier version of this module, which had
+this wrong): use_language_asr_input is REQUIRED by BOTH of Sahara's
+file-upload endpoints, sync and async alike. Omitting it, or sending an
+empty/"auto"-style placeholder value, is rejected outright on both --
+"use_language_asr_input is required" / "... is not supported". There is
+NO auto-detect mode on either endpoint despite an earlier version of
+this file claiming testing had shown otherwise (that claim was never
+actually verified against Sahara's Auto-detect path specifically, only
+against explicit-language requests). So: "Auto-detect" in this app's own
+language dropdown cannot be sent to Sahara at all -- see
+_transcribe_via_sahara's upfront check, which raises a clear error
+asking the clinician to pick a specific language instead of surfacing
+Sahara's raw rejection.
 
 Twi is Sahara-supported for plain transcription but is NOT one of its
-code-switched language pairs (unlike Pidgin, Hausa, and Yoruba) — so
-Sahara offers less of an advantage there than for the other three.
+code-switched language pairs (unlike Pidgin, Hausa, and Yoruba) -- so
+Sahara offers less of an advantage there than for the other three. (Sahara
+does separately support "Akan-English" as a code-switched pair, code
+"ak" -- distinct from plain Twi/"tw" -- not currently exposed in this
+app's language dropdown.)
 """
 import hashlib
 import threading
@@ -138,21 +157,30 @@ _SAHARA_POLL_TIMEOUT_S = 900  # 15 min ceiling; a real consultation shouldn't ap
 def _transcribe_via_sahara(audio_path: str, language_hint: str) -> Tuple[str, str]:
     """Returns (transcript_text, detected_language_label).
 
-    Uses Sahara's ASYNCHRONOUS file-upload endpoint (upload, then poll
-    /file/v1/status/{file_id} until FILE_TRANSCRIBED), not the synchronous
-    one. The sync endpoint hard-caps audio at 120s/request -- confirmed via
-    task-1 verification (docs/sahara_stt_verification.md) that most real
-    consultation-length recordings exceed that, so async is the only way to
-    transcribe a full recording rather than truncating it. No fixed length
-    cap here; polling runs up to _SAHARA_POLL_TIMEOUT_S.
+    Uses Sahara's asynchronous file-upload endpoint (upload, then poll
+    /file/v1/status/{file_id} until FILE_TRANSCRIBED). use_language_asr_input
+    is REQUIRED -- see module docstring for why "Auto-detect" can't be sent
+    to Sahara at all, and raises a clear, actionable error here instead of
+    Sahara's raw rejection.
 
-    Raises RuntimeError with a clear message on missing API key, upload
+    Raises RuntimeError with a clear message on missing API key/language,
     HTTP errors, a FILE_PROCESSING_FAILED status, or a poll timeout.
     """
     if not config.SAHARA_API_KEY:
         raise RuntimeError(
             "SAHARA_API_KEY is not set. Add it to your .env, or set "
             "EPISCRIBE_STT_BACKEND=whisper to use the offline backend instead."
+        )
+
+    lang_code = _SAHARA_LANGUAGE_CODES.get(language_hint)
+    if not lang_code:
+        raise RuntimeError(
+            f"Sahara needs a specific language to transcribe with -- "
+            f"{language_hint!r} has no Sahara language code (Sahara has no "
+            f"auto-detect mode on either of its file-upload endpoints, "
+            f"confirmed directly against the API). Please pick a specific "
+            f"language from the Language hint dropdown and try again, or "
+            f"switch to EPISCRIBE_STT_BACKEND=whisper."
         )
 
     try:
@@ -162,21 +190,14 @@ def _transcribe_via_sahara(audio_path: str, language_hint: str) -> Tuple[str, st
             "requests is not installed. Run: pip install requests"
         ) from exc
 
-    lang_code = _SAHARA_LANGUAGE_CODES.get(language_hint)
     headers = {"Authorization": f"Bearer {config.SAHARA_API_KEY}"}
-
     request_data = {
         "audio_file_name": "episcribe_recording",
         # Telehealth category matches this app's domain and keeps us on
         # Sahara's clinical-tuned post-processing.
         "use_category": "file_category_telehealth",
+        "use_language_asr_input": lang_code,
     }
-    # Only send a language hint when one is actually known — omitting the
-    # field lets Sahara handle detection/code-switching itself, which
-    # tested noticeably better than forcing "en" on every Auto-detect
-    # request (see comment on _SAHARA_LANGUAGE_CODES above).
-    if lang_code:
-        request_data["use_language_asr_input"] = lang_code
 
     with open(audio_path, "rb") as f:
         try:
@@ -202,7 +223,7 @@ def _transcribe_via_sahara(audio_path: str, language_hint: str) -> Tuple[str, st
     if not file_id:
         raise RuntimeError(f"Sahara upload response had no file_id: {response.text[:300]}")
 
-    detected = _SAHARA_CODE_TO_LABEL.get(lang_code, "auto (Sahara)")
+    detected = _SAHARA_CODE_TO_LABEL.get(lang_code, lang_code)
     status_url = _SAHARA_STATUS_ENDPOINT.format(file_id=file_id)
     deadline = time.monotonic() + _SAHARA_POLL_TIMEOUT_S
     while True:

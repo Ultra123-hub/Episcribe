@@ -41,3 +41,16 @@ decided 2026-09-14, tracked as follow-up work, not done as part of this verifica
 Full transcripts, ground-truth comparisons, and timings from the verification run are not
 checked into the repo (audio samples aren't either, per `.gitignore`) — re-run
 against fresh `intronhealth/AfriSwitchCare` samples to reproduce.
+
+## Addendum (2026-09-15): "Auto-detect" never actually worked against Sahara
+
+All verification above used an explicit language hint (Hausa/Yoruba/Nigerian Pidgin) for
+every Sahara call — "Auto-detect" (the app's own UI default) was never tested against Sahara
+here. It turned out not to work: a pre-existing comment in `transcribe.py` claimed omitting
+`use_language_asr_input` let Sahara auto-detect the language, based on testing that, in
+hindsight, never actually covered the Auto-detect path either. Live testing today (prompted by
+a real user hitting this during a demo dry run) confirmed `use_language_asr_input` is REQUIRED
+by Sahara's file-upload endpoints — no auto-detect mode exists. Fixed: `_transcribe_via_sahara`
+now raises a clear, actionable error when no specific language is selected, instead of
+surfacing Sahara's raw rejection. See `src/transcribe.py`'s module docstring and git history
+for detail.

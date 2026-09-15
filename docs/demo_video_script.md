@@ -18,7 +18,10 @@ structured WHO IDSR case record, using Sahara 2.5."*
 ## Beat 2 — Language pair 1: Nigerian Pidgin-English (45-60s)
 
 On the **New Consultation** tab:
-1. Set language hint to "Nigerian Pidgin" (or leave Auto-detect).
+1. Set language hint to "Nigerian Pidgin" -- **must** be an explicit
+   language, not "Auto-detect": Sahara has no auto-detect mode on either
+   of its file-upload endpoints (confirmed against the live API), so
+   "Auto-detect" now fails with a clear error rather than transcribing.
 2. Click record, speak a short code-switched narrative, e.g.:
    > *"Good morning doctor, my pikin get fever since two days, e dey
    > hot well well, e no wan chop, na so so vomiting since yesterday."*
