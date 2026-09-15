@@ -1,0 +1,9 @@
+# Extra dependencies for scripts/benchmark_stt.py only -- NOT needed to run
+# the app itself (see requirements.txt for that). Kept separate so the app's
+# install stays lean; torch+transformers are only pulled in to run the MMS
+# comparison model for the STT benchmark.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+transformers
+jiwer
+whisper_normalizer
