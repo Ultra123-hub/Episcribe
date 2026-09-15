@@ -18,9 +18,12 @@ Sahara requires an internet connection and an API key
 (SAHARA_API_KEY), but is purpose-built for African-accented and
 code-switched speech (e.g. Hausa-English, Yoruba-English,
 Pidgin-English) and should be materially more accurate on those
-languages when connectivity allows. Its sync upload endpoint caps audio
-at 120 seconds per request; longer recordings need a different (async)
-endpoint we haven't wired up yet.
+languages when connectivity allows. Uses Sahara's asynchronous
+file-upload endpoint (upload, then poll for status) rather than its
+synchronous one, which hard-caps audio at 120 seconds/request -- most
+real consultation-length recordings exceed that (confirmed during
+verification, see docs/sahara_stt_verification.md), so async is what
+lets a full recording get transcribed instead of silently truncated.
 
 Twi is Sahara-supported for plain transcription but is NOT one of its
 code-switched language pairs (unlike Pidgin, Hausa, and Yoruba) — so
@@ -28,6 +31,7 @@ Sahara offers less of an advantage there than for the other three.
 """
 import hashlib
 import threading
+import time
 from typing import Optional, Tuple
 
 import config
@@ -64,7 +68,7 @@ _SAHARA_LANGUAGE_CODES = {
     "Twi": "tw",  # supported, but not one of Sahara's code-switched pairs
 }
 
-# Reverse of the above, for display purposes only. Sahara's sync response
+# Reverse of the above, for display purposes only. Sahara's response
 # doesn't include a detected-language field (confirmed against its actual
 # response payload), so when a language was explicitly selected we echo
 # back that human-readable label rather than the raw code Sahara expects
@@ -72,8 +76,6 @@ _SAHARA_LANGUAGE_CODES = {
 # was specified (Auto-detect), we're honest that we don't actually know
 # what Sahara detected, since it doesn't tell us.
 _SAHARA_CODE_TO_LABEL = {v: k for k, v in _SAHARA_LANGUAGE_CODES.items() if v}
-
-_SAHARA_ENDPOINT = "https://infer.voice.intron.io/file/v1/upload/sync"
 
 
 def _get_whisper_model():
@@ -127,13 +129,25 @@ def _transcribe_via_whisper(audio_path: str, language_hint: str) -> Tuple[str, s
     return text, detected
 
 
+_SAHARA_UPLOAD_ENDPOINT = "https://infer.voice.intron.io/file/v1/upload"
+_SAHARA_STATUS_ENDPOINT = "https://infer.voice.intron.io/file/v1/status/{file_id}"
+_SAHARA_POLL_INTERVAL_S = 5
+_SAHARA_POLL_TIMEOUT_S = 900  # 15 min ceiling; a real consultation shouldn't approach this
+
+
 def _transcribe_via_sahara(audio_path: str, language_hint: str) -> Tuple[str, str]:
     """Returns (transcript_text, detected_language_label).
 
-    Uses Sahara's synchronous file-upload endpoint. Raises RuntimeError
-    with a clear message on missing API key, HTTP errors, or the 503
-    processing-timeout case documented by Intron (which can occur even
-    on a successful upload if the file is still processing after 120s).
+    Uses Sahara's ASYNCHRONOUS file-upload endpoint (upload, then poll
+    /file/v1/status/{file_id} until FILE_TRANSCRIBED), not the synchronous
+    one. The sync endpoint hard-caps audio at 120s/request -- confirmed via
+    task-1 verification (docs/sahara_stt_verification.md) that most real
+    consultation-length recordings exceed that, so async is the only way to
+    transcribe a full recording rather than truncating it. No fixed length
+    cap here; polling runs up to _SAHARA_POLL_TIMEOUT_S.
+
+    Raises RuntimeError with a clear message on missing API key, upload
+    HTTP errors, a FILE_PROCESSING_FAILED status, or a poll timeout.
     """
     if not config.SAHARA_API_KEY:
         raise RuntimeError(
@@ -149,6 +163,7 @@ def _transcribe_via_sahara(audio_path: str, language_hint: str) -> Tuple[str, st
         ) from exc
 
     lang_code = _SAHARA_LANGUAGE_CODES.get(language_hint)
+    headers = {"Authorization": f"Bearer {config.SAHARA_API_KEY}"}
 
     request_data = {
         "audio_file_name": "episcribe_recording",
@@ -166,36 +181,52 @@ def _transcribe_via_sahara(audio_path: str, language_hint: str) -> Tuple[str, st
     with open(audio_path, "rb") as f:
         try:
             response = requests.post(
-                _SAHARA_ENDPOINT,
-                headers={"Authorization": f"Bearer {config.SAHARA_API_KEY}"},
+                _SAHARA_UPLOAD_ENDPOINT,
+                headers=headers,
                 data=request_data,
                 files={"audio_file_blob": f},
-                timeout=130,  # endpoint itself can take up to 120s
+                timeout=60,  # just the upload itself, not processing
             )
         except requests.RequestException as exc:
-            raise RuntimeError(f"Sahara request failed: {exc}") from exc
+            raise RuntimeError(f"Sahara upload failed: {exc}") from exc
 
-    if response.status_code == 503:
-        raise RuntimeError(
-            "Sahara timed out processing this file within 120 seconds. "
-            "Try a shorter recording, or switch to the whisper backend."
-        )
     if response.status_code == 400:
         raise RuntimeError(
-            f"Sahara rejected the request (likely audio too long or "
-            f"unsupported format): {response.text[:300]}"
+            f"Sahara rejected the upload (likely unsupported format): "
+            f"{response.text[:300]}"
         )
     if not response.ok:
-        raise RuntimeError(f"Sahara returned HTTP {response.status_code}: {response.text[:300]}")
+        raise RuntimeError(f"Sahara upload returned HTTP {response.status_code}: {response.text[:300]}")
 
-    payload = response.json()
-    data = payload.get("data", {})
-    text = (data.get("audio_transcript") or "").strip()
-    # Sahara's sync response doesn't include a detected-language field, so
-    # this reflects what we told it (as a readable label), or is honest
-    # that we don't know if nothing was specified (Auto-detect).
+    file_id = (response.json().get("data") or {}).get("file_id")
+    if not file_id:
+        raise RuntimeError(f"Sahara upload response had no file_id: {response.text[:300]}")
+
     detected = _SAHARA_CODE_TO_LABEL.get(lang_code, "auto (Sahara)")
-    return text, detected
+    status_url = _SAHARA_STATUS_ENDPOINT.format(file_id=file_id)
+    deadline = time.monotonic() + _SAHARA_POLL_TIMEOUT_S
+    while True:
+        try:
+            status_resp = requests.get(status_url, headers=headers, timeout=30)
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Sahara status check failed: {exc}") from exc
+        if not status_resp.ok:
+            raise RuntimeError(
+                f"Sahara status check returned HTTP {status_resp.status_code}: "
+                f"{status_resp.text[:300]}"
+            )
+        status_data = status_resp.json().get("data") or {}
+        state = status_data.get("processing_status")
+        if state == "FILE_TRANSCRIBED":
+            return (status_data.get("audio_transcript") or "").strip(), detected
+        if state == "FILE_PROCESSING_FAILED":
+            raise RuntimeError(f"Sahara failed to process this file: {status_data}")
+        if time.monotonic() > deadline:
+            raise RuntimeError(
+                f"Sahara did not finish transcribing within "
+                f"{_SAHARA_POLL_TIMEOUT_S}s (last status: {state})."
+            )
+        time.sleep(_SAHARA_POLL_INTERVAL_S)
 
 
 def transcribe_audio(audio_path: str, language_hint: str = "Auto-detect") -> Tuple[str, str, str]:
