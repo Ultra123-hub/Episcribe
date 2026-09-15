@@ -71,9 +71,45 @@ severe enough to affect the "Technical Execution: latency handling" judging
 criterion (15%) and any live demo. Flagged for awareness, not fixed as part
 of this verification.
 
+## Fixes applied and re-verified (same day)
+
+Per project decision, fixed (A) and (B) above, left (C, latency) as a known
+limitation. Implementation: `_repair_truncated_json()` trims a cut-off
+response back to the last complete `"key": value` pair and closes the object
+there (drops only the broken trailing field — every field it can drop has a
+safe schema default except `syndrome_category`, which is always generated
+first, so a repair that loses required data still fails validation exactly
+as before, not a new silent-fallback path); `_filter_denied_symptoms()` is a
+deterministic keyword guard, same spirit as the existing
+`_soap_hallucination_flags`, that drops a symptom explicitly negated near it
+in the narrative. Both are surfaced via `hallucination_flags`, never applied
+silently. Regression coverage added to `scripts/smoke_test.py`.
+
+Re-ran the same 4 live cases end-to-end afterward:
+
+- **4/4 succeeded** (previously 2/4). The two that hit the truncation bug
+  again were recovered instead of hard-failing, each clearly flagged.
+- **Negation guard confirmed live**: the measles case's raw output still
+  included "cough" despite the narrative saying "No cough" (confirms the
+  model doesn't reliably follow the instruction on its own) — the guard
+  caught and removed it, flagged: *"Removed symptom(s) the narrative
+  appears to explicitly deny: cough."* The Yoruba-style synonym gap remains
+  as documented ("dyspnea" vs. "denies difficulty breathing" still isn't
+  caught).
+
+**New observation, not fixed:** one recovered record's `soap_assessment`
+contained bizarre, off-topic content unrelated to the clinical narrative
+(a tangent about social media and economic hardship, in Pidgin) before the
+truncation point. This confirms the truncation-adjacent text is sometimes
+genuinely low-quality model output, not an artifact of the repair logic —
+a real model-quality/hallucination-drift issue in the free-text SOAP fields
+under CPU/quantized inference, separate from the two fixed bugs. Flagged for
+awareness; not addressed here.
+
 ## Conclusion
 
 Extraction is genuinely input-sensitive — the specific bug CLAUDE.md worried
 about does not exist. Testing surfaced two different, real issues instead
-(JSON-completion reliability, negation handling) plus a latency concern,
-which are separate follow-up decisions.
+(JSON-completion reliability, negation handling), both now fixed and
+re-verified against the live model, plus a latency concern and a SOAP
+content-quality observation, both left as known limitations for now.
